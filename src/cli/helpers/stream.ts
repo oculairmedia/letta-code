@@ -13,13 +13,19 @@ export type ApprovalRequest = {
   toolCallId: string;
   toolName: string;
   toolArgs: string;
+  groupId?: string | null;
+};
+
+export type MultipleApprovalRequest = {
+  toolCalls: ApprovalRequest[];
 };
 
 type DrainResult = {
   stopReason: StopReasonType;
   lastRunId?: string | null;
   lastSeqId?: number | null;
-  approval?: ApprovalRequest | null; // present only if we ended due to approval
+  approval?: ApprovalRequest | null; // present only if we ended due to approval (single tool call)
+  approvals?: MultipleApprovalRequest | null; // present if multiple tool calls need approval
   apiDurationMs: number; // time spent in API call
 };
 
@@ -35,6 +41,10 @@ export async function drainStream(
   let toolCallId: string | null = null;
   let toolName: string | null = null;
   let toolArgs: string | null = null;
+  let chunkGroupId: string | null = null;
+
+  // Track multiple tool calls
+  const toolCallsMap = new Map<string, { name: string; args: string }>();
 
   let stopReason: StopReasonType | null = null;
   let lastRunId: string | null = null;
@@ -69,6 +79,12 @@ export async function drainStream(
       approvalRequestId = chunk.id;
     }
 
+    const possibleGroupId =
+      (chunk as { group_id?: string | null }).group_id ?? null;
+    if (possibleGroupId) {
+      chunkGroupId = possibleGroupId;
+    }
+
     // NOTE: this this a little ugly - we're basically processing tool name and chunk deltas
     // in both the onChunk handler and here, we could refactor to instead pull the tool name
     // and JSON args from the mutated lines (eg last mutated line)
@@ -76,29 +92,35 @@ export async function drainStream(
       chunk.message_type === "tool_call_message" ||
       chunk.message_type === "approval_request_message"
     ) {
-      // Use deprecated tool_call or new tool_calls array
-      const toolCall =
-        chunk.tool_call ||
-        (Array.isArray(chunk.tool_calls) && chunk.tool_calls.length > 0
-          ? chunk.tool_calls[0]
-          : null);
+      // Handle both single tool_call and multiple tool_calls array
+      const toolCalls = chunk.tool_call
+        ? [chunk.tool_call]
+        : Array.isArray(chunk.tool_calls)
+          ? chunk.tool_calls
+          : [];
 
-      if (toolCall?.tool_call_id) {
-        toolCallId = toolCall.tool_call_id;
-      }
-      if (toolCall?.name) {
-        if (toolName) {
-          // TODO would expect that we should allow stacking? I guess not?
-          //   toolName = toolName + toolCall.name;
-        } else {
-          toolName = toolCall.name;
-        }
-      }
-      if (toolCall?.arguments) {
-        if (toolArgs) {
-          toolArgs = toolArgs + toolCall.arguments;
-        } else {
-          toolArgs = toolCall.arguments;
+      for (const toolCall of toolCalls) {
+        if (toolCall?.tool_call_id) {
+          const callId = toolCall.tool_call_id;
+
+          // Get or create entry for this tool call
+          const existing = toolCallsMap.get(callId) || { name: "", args: "" };
+
+          if (toolCall.name) {
+            existing.name = toolCall.name;
+          }
+          if (toolCall.arguments) {
+            existing.args += toolCall.arguments;
+          }
+
+          toolCallsMap.set(callId, existing);
+
+          // Keep backward compatibility for single tool call
+          if (!toolCallId) {
+            toolCallId = callId;
+            toolName = existing.name;
+            toolArgs = existing.args;
+          }
         }
       }
     }
@@ -122,16 +144,42 @@ export async function drainStream(
   queueMicrotask(refresh);
 
   // Package the approval request at the end
-  const approval =
-    toolCallId && toolName && toolArgs && approvalRequestId
-      ? {
-          toolCallId: toolCallId,
-          toolName: toolName,
-          toolArgs: toolArgs,
-        }
-      : null;
+  let approval: ApprovalRequest | null = null;
+  let approvals: MultipleApprovalRequest | null = null;
+
+  if (approvalRequestId && toolCallsMap.size > 0) {
+    const entries = Array.from(toolCallsMap.entries());
+
+    if (entries.length === 1 && entries[0]) {
+      // Single tool call - use legacy format
+      const [callId, call] = entries[0];
+      approval = {
+        toolCallId: callId,
+        toolName: call.name,
+        toolArgs: call.args,
+        groupId: chunkGroupId,
+      };
+    } else if (entries.length > 1) {
+      // Multiple tool calls
+      approvals = {
+        toolCalls: entries.map(([callId, call]) => ({
+          toolCallId: callId,
+          toolName: call.name,
+          toolArgs: call.args,
+          groupId: chunkGroupId,
+        })),
+      };
+    }
+  }
 
   const apiDurationMs = performance.now() - startTime;
 
-  return { stopReason, approval, lastRunId, lastSeqId, apiDurationMs };
+  return {
+    stopReason,
+    approval,
+    approvals,
+    lastRunId,
+    lastSeqId,
+    apiDurationMs,
+  };
 }

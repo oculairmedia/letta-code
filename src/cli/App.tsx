@@ -51,7 +51,11 @@ import {
   clearPlaceholdersInText,
 } from "./helpers/pasteRegistry";
 import { safeJsonParseOr } from "./helpers/safeJsonParse";
-import { type ApprovalRequest, drainStream } from "./helpers/stream";
+import {
+  type ApprovalRequest,
+  type MultipleApprovalRequest,
+  drainStream,
+} from "./helpers/stream";
 import { getRandomThinkingMessage } from "./helpers/thinkingMessages";
 import { useTerminalWidth } from "./hooks/useTerminalWidth";
 
@@ -388,12 +392,13 @@ export default function App({
         while (true) {
           // Stream one turn
           const stream = await sendMessageStream(agentId, currentInput);
-          const { stopReason, approval, apiDurationMs } = await drainStream(
-            stream,
-            buffersRef.current,
-            refreshDerivedThrottled,
-            abortControllerRef.current.signal,
-          );
+          const { stopReason, approval, approvals, apiDurationMs } =
+            await drainStream(
+              stream,
+              buffersRef.current,
+              refreshDerivedThrottled,
+              abortControllerRef.current.signal,
+            );
 
           // Track API duration
           sessionStatsRef.current.endTurn(apiDurationMs);
@@ -417,6 +422,56 @@ export default function App({
 
           // Case 2: Requires approval
           if (stopReason === "requires_approval") {
+            // Handle multiple tool calls
+            if (approvals && approvals.toolCalls.length > 0) {
+              // For now, auto-approve all tool calls and execute them
+              const approvalResults = [];
+
+              for (const toolCall of approvals.toolCalls) {
+                const parsedArgs = safeJsonParseOr<Record<string, unknown>>(
+                  toolCall.toolArgs,
+                  {},
+                );
+                const toolResult = await executeTool(
+                  toolCall.toolName,
+                  parsedArgs,
+                );
+
+                approvalResults.push({
+                  type: "tool" as const,
+                  tool_call_id: toolCall.toolCallId,
+                  tool_return: toolResult.toolReturn,
+                  status: toolResult.status,
+                  stdout: toolResult.stdout,
+                  stderr: toolResult.stderr,
+                });
+
+                // Update buffers with each tool return
+                onChunk(buffersRef.current, {
+                  message_type: "tool_return_message",
+                  id: "dummy",
+                  date: new Date().toISOString(),
+                  tool_call_id: toolCall.toolCallId,
+                  tool_return: toolResult.toolReturn,
+                  status: toolResult.status,
+                  stdout: toolResult.stdout,
+                  stderr: toolResult.stderr,
+                });
+              }
+
+              refreshDerived();
+
+              // Restart conversation loop with all approval responses
+              await processConversation([
+                {
+                  type: "approval",
+                  approvals: approvalResults,
+                },
+              ]);
+              continue;
+            }
+
+            // Single approval handling (existing logic)
             if (!approval) {
               appendError(
                 `Unexpected null approval with stop reason: ${stopReason}`,
