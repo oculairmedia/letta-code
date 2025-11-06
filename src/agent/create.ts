@@ -18,7 +18,7 @@ import { SYSTEM_PROMPT } from "./promptAssets";
 export async function createAgent(
   name = "letta-cli-agent",
   model?: string,
-  embeddingModel = "openai/text-embedding-3-small",
+  embeddingModel = "letta/letta-free",
   updateArgs?: Record<string, unknown>,
 ) {
   // Resolve model identifier to handle
@@ -34,7 +34,7 @@ export async function createAgent(
     modelHandle = resolved;
   } else {
     // Use default model
-    modelHandle = "anthropic/claude-sonnet-4-5-20250929";
+    modelHandle = "anthropic/sonnet-4-5";
   }
 
   const client = await getClient();
