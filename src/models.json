@@ -1,11 +1,11 @@
 [
   {
     "id": "default",
-    "handle": "anthropic/claude-sonnet-4-5-20250929",
+    "handle": "anthropic/sonnet-4-5",
     "label": "Claude Sonnet 4.5 (default)",
     "description": "The recommended default model (currently Sonnet 4.5)",
     "isDefault": true,
-    "updateArgs": { "context_window": 180000 }
+    "updateArgs": { "context_window": 200000 }
   },
   {
     "id": "opus",
